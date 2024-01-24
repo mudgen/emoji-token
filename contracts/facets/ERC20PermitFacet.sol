@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Code modified from 
-pragma solidity 0.8.6;
-// Code modified from https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts/master/contracts/token/ERC20/extensions/draft-ERC20Permit.sol
+pragma solidity 0.8.23;
+// Code modified from https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.0.1/contracts/token/ERC20/extensions/ERC20Permit.sol
 import { AppStorage } from "../libraries/LibAppStorage.sol";
+import { MessageHashUtils } from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { Counters } from "@openzeppelin/contracts/utils/Counters.sol";
 import { LibERC20 } from "../libraries/LibERC20.sol";
 
 /**
@@ -15,25 +15,38 @@ import { LibERC20 } from "../libraries/LibERC20.sol";
  * presenting a message signed by the account. By not relying on `{IERC20-approve}`, the token holder account doesn't
  * need to send a transaction, and thus is not required to hold Ether at all.
  *
- * _Available since v3.4._
  */
 contract ERC20PermitFacet {
     AppStorage s;
-    using Counters for Counters.Counter;
-
+    
     /* solhint-disable var-name-mixedcase */
     // Cache the domain separator as an immutable value, but also store the chain id that it corresponds to, in order to
     // invalidate the cached domain separator if the chain id changes.
     bytes32 private immutable CACHED_DOMAIN_SEPARATOR;
     uint256 private immutable CACHED_CHAIN_ID;
-
+    
     bytes32 private immutable HASHED_NAME;
     bytes32 private immutable HASHED_VERSION;
-    bytes32 private immutable TYPE_HASH;
 
-    // solhint-disable-next-line var-name-mixedcase
-    bytes32 private immutable PERMIT_TYPEHASH =
+
+    // should be the proxy address
+    address private immutable CACHED_THIS;
+    
+     
+    bytes32 private constant TYPE_HASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    bytes32 private constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
+    /**
+     * @dev Permit deadline has expired.
+     */
+    error ERC2612ExpiredSignature(uint256 deadline);
+
+    /**
+     * @dev Mismatched signature.
+     */
+    error ERC2612InvalidSigner(address signer, address owner);
 
     /**
      * @dev Initializes the {EIP712} domain separator using the `name` parameter, and setting `version` to `"1"`.
@@ -41,36 +54,28 @@ contract ERC20PermitFacet {
      * It's a good idea to use the same `name` that is defined as the ERC20 token name.
      */
     // constructor(string memory name) EIP712(name, "1") {}
-    constructor() {
-        bytes32 hashedName = keccak256(bytes("Diamond Emoji Token"));
-        bytes32 hashedVersion = keccak256(bytes("1"));
-        bytes32 typeHash = keccak256(
-            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-        );
-        HASHED_NAME = hashedName;
-        HASHED_VERSION = hashedVersion;
+    constructor(address _diamondAddress) {                
+        HASHED_NAME = keccak256(bytes(unicode"💎 Token"));
+        HASHED_VERSION = keccak256(bytes("1"));
         CACHED_CHAIN_ID = block.chainid;
-        CACHED_DOMAIN_SEPARATOR = buildDomainSeparator(typeHash, hashedName, hashedVersion);
-        TYPE_HASH = typeHash;
+        CACHED_DOMAIN_SEPARATOR = buildDomainSeparator(_diamondAddress);
+        CACHED_THIS = _diamondAddress;
     }
 
+    
     /**
      * @dev Returns the domain separator for the current chain.
      */
     function domainSeparatorV4() internal view returns (bytes32) {
-        if (block.chainid == CACHED_CHAIN_ID) {
+        if (address(this) == CACHED_THIS && block.chainid == CACHED_CHAIN_ID) {
             return CACHED_DOMAIN_SEPARATOR;
         } else {
-            return buildDomainSeparator(TYPE_HASH, HASHED_NAME, HASHED_VERSION);
+            return buildDomainSeparator(address(this));
         }
     }
 
-    function buildDomainSeparator(
-        bytes32 _typeHash,
-        bytes32 _nameHash,
-        bytes32 _versionHash
-    ) private view returns (bytes32) {
-        return keccak256(abi.encode(_typeHash, _nameHash, _versionHash, block.chainid, address(this)));
+    function buildDomainSeparator(address _diamondAddress) private view returns (bytes32) {
+        return keccak256(abi.encode(TYPE_HASH, HASHED_NAME, HASHED_VERSION, block.chainid, _diamondAddress));
     }
 
     /**
@@ -89,7 +94,31 @@ contract ERC20PermitFacet {
      * ```
      */
     function hashTypedDataV4(bytes32 _structHash) internal view virtual returns (bytes32) {
-        return ECDSA.toTypedDataHash(domainSeparatorV4(), _structHash);
+        return  MessageHashUtils.toTypedDataHash(domainSeparatorV4(), _structHash);
+    }
+
+     function eip712Domain()
+        external
+        view        
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (
+            hex"0f", // 01111
+            unicode"💎 Token",
+            "1",
+            block.chainid,
+            address(this),
+            bytes32(0),
+            new uint256[](0)
+        );
     }
 
     /**
@@ -104,23 +133,24 @@ contract ERC20PermitFacet {
         bytes32 _r,
         bytes32 _s
     ) external {
-        require(block.timestamp <= _deadline, "ERC20Permit: expired deadline");
-
+        if (block.timestamp > _deadline) {
+          revert ERC2612ExpiredSignature(_deadline);
+        }
+        
         bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, _owner, _spender, _value, useNonce(_owner), _deadline));
 
         bytes32 hash = hashTypedDataV4(structHash);
 
         address signer = ECDSA.recover(hash, _v, _r, _s);
-        require(signer == _owner, "ERC20Permit: invalid signature");
+        if (signer != _owner) {
+          revert ERC2612InvalidSigner(signer, _owner);
+        }        
 
         LibERC20.approve(s, _owner, _spender, _value);
     }
 
-    /**
-     * @dev See {IERC20Permit-nonces}.
-     */
-    function nonces(address _owner) public view returns (uint256) {
-        return s.nonces[_owner].current();
+    function nonces(address _owner) external view returns (uint256) {
+        return s.nonces[_owner];
     }
 
     /**
@@ -131,14 +161,8 @@ contract ERC20PermitFacet {
         return domainSeparatorV4();
     }
 
-    /**
-     * @dev "Consume a nonce": return the current value and increment.
-     *
-     * _Available since v4.1._
-     */
-    function useNonce(address _owner) internal returns (uint256 current) {
-        Counters.Counter storage nonce = s.nonces[_owner];
-        current = nonce.current();
-        nonce.increment();
+    function useNonce(address _owner) internal returns (uint256 current_) {        
+        current_ = s.nonces[_owner];
+        s.nonces[_owner] = current_ + 1;
     }
 }

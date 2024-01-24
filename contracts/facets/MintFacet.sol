@@ -1,5 +1,5 @@
 //SPDX-License-Identifier: MIT
-pragma solidity 0.8.6;
+pragma solidity 0.8.23;
 
 import {AppStorage} from "../libraries/LibAppStorage.sol";
 import {LibERC20} from "../libraries/LibERC20.sol";
